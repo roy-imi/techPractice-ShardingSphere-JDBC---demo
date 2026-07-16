@@ -1,0 +1,197 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.assetinspection.mapper.InspectionRecordMapper">
+
+    <!--
+      统一字段清单。两个 @@ 字段让响应直接告诉我们：这次 SELECT 实际由哪个 MySQL server-id 返回。
+      legacy server-id=10；ds0 主/从=100/200；ds1 主/从=101/201。
+    -->
+    <sql id="recordColumns">
+        id,
+        tenant_id,
+        request_id,
+        asset_id,
+        asset_code,
+        inspection_point_id,
+        inspection_point_name,
+        record_date,
+        inspected_at,
+        status,
+        measured_value,
+        unit,
+        result_description,
+        inspector_id,
+        version,
+        created_at,
+        updated_at,
+        @@server_id AS served_by_server_id,
+        DATABASE() AS served_by_database
+    </sql>
+
+    <!--
+      正常新写入故意不提供 id：legacy profile 由单库 AUTO_INCREMENT 生成；product profile
+      由 ShardingSphere 根据 keyGenerateStrategy 生成 Snowflake ID。
+      tenant_id 和 record_date 同时出现在 VALUES，所以 INSERT 可以精确路由到“一库一表”，
+      随后读写分离规则把它送到主库。
+
+      这里不启用 MyBatis useGeneratedKeys：ShardingSphere 5.5.3 返回的是逻辑生成键结果集，
+      与本项目 MyBatis 3.5.14 组合时会触发 “Too many keys are generated”。Service 会在同一
+      事务中按 tenant_id + record_date + request_id 回读，两个 profile 都能拿到 ID；分片模式下
+      还可保证该回读仍走主库。
+    -->
+    <insert id="insert"
+            parameterType="com.example.assetinspection.domain.InspectionRecord">
+        INSERT INTO inspection_record (
+            tenant_id,
+            request_id,
+            asset_id,
+            asset_code,
+            inspection_point_id,
+            inspection_point_name,
+            record_date,
+            inspected_at,
+            status,
+            measured_value,
+            unit,
+            result_description,
+            inspector_id,
+            version,
+            created_at,
+            updated_at
+        ) VALUES (
+            #{tenantId},
+            #{requestId},
+            #{assetId},
+            #{assetCode},
+            #{inspectionPointId},
+            #{inspectionPointName},
+            #{recordDate},
+            #{inspectedAt},
+            #{status},
+            #{measuredValue},
+            #{unit},
+            #{resultDescription},
+            #{inspectorId},
+            #{version},
+            #{createdAt},
+            #{updatedAt}
+        )
+    </insert>
+
+    <!--
+      只用于“创建后同事务回读”：三个条件同时保证分库、分表和局部唯一键均可利用。
+      因为调用方仍在 @Transactional 写事务中，READWRITE_SPLITTING 会把本次 SELECT 留在主库。
+    -->
+    <select id="selectByRequestId" resultType="com.example.assetinspection.domain.InspectionRecord">
+        SELECT <include refid="recordColumns"/>
+        FROM inspection_record
+        WHERE tenant_id = #{tenantId}
+          AND record_date = #{recordDate}
+          AND request_id = #{requestId}
+        LIMIT 1
+    </select>
+
+    <!--
+      历史回填必须保留旧表 ID，不能再生成新 ID。INSERT IGNORE 让同一批次可以安全重跑；
+      生产迁移还应把“被忽略的主键/局部唯一键冲突”记录并比对字段，不能只看没有报错。
+    -->
+    <insert id="insertForMigration" parameterType="com.example.assetinspection.domain.InspectionRecord">
+        INSERT IGNORE INTO inspection_record (
+            id, tenant_id, request_id, asset_id, asset_code,
+            inspection_point_id, inspection_point_name, record_date, inspected_at,
+            status, measured_value, unit, result_description, inspector_id,
+            version, created_at, updated_at
+        ) VALUES (
+            #{id}, #{tenantId}, #{requestId}, #{assetId}, #{assetCode},
+            #{inspectionPointId}, #{inspectionPointName}, #{recordDate}, #{inspectedAt},
+            #{status}, #{measuredValue}, #{unit}, #{resultDescription}, #{inspectorId},
+            #{version}, #{createdAt}, #{updatedAt}
+        )
+    </insert>
+
+    <!-- tenant_id 在大客户版精确到一个库，record_date 精确到一张季度表，id 再命中唯一记录。 -->
+    <select id="selectByRoutingKeys" resultType="com.example.assetinspection.domain.InspectionRecord">
+        SELECT <include refid="recordColumns"/>
+        FROM inspection_record
+        WHERE tenant_id = #{tenantId}
+          AND record_date = #{recordDate}
+          AND id = #{id}
+        LIMIT 1
+    </select>
+
+    <!--
+      半开区间 [startDate,endDateExclusive) 可被自定义 STANDARD 算法提取并裁剪季度表。
+      游标条件与 ORDER BY 完全同序：先 record_date DESC，再 id DESC，保证翻页稳定。
+      Service 多取一条（limit=size+1）判断 hasMore，避免额外 COUNT 全部命中表。
+    -->
+    <select id="selectPage" resultType="com.example.assetinspection.domain.InspectionRecord">
+        SELECT <include refid="recordColumns"/>
+        FROM inspection_record
+        WHERE tenant_id = #{tenantId}
+          AND record_date &gt;= #{startDate}
+          AND record_date &lt; #{endDateExclusive}
+        <if test="status != null">
+          AND status = #{status}
+        </if>
+        <if test="cursorDate != null and cursorId != null">
+          AND (
+                record_date &lt; #{cursorDate}
+                OR (record_date = #{cursorDate} AND id &lt; #{cursorId})
+              )
+        </if>
+        ORDER BY record_date DESC, id DESC
+        LIMIT #{limit}
+    </select>
+
+    <!-- 跨季度时每张表先局部 GROUP BY，ShardingSphere 再按 status 归并求和。 -->
+    <select id="countByStatus" resultType="com.example.assetinspection.dto.StatusCount">
+        SELECT status, COUNT(*) AS count
+        FROM inspection_record
+        WHERE tenant_id = #{tenantId}
+          AND record_date &gt;= #{startDate}
+          AND record_date &lt; #{endDateExclusive}
+        GROUP BY status
+        ORDER BY status
+    </select>
+
+    <!--
+      更新条件必须同时带 id + tenant_id + record_date：前两者不是“多余条件”，
+      tenant_id 决定库，record_date 决定表，version 防止两个操作员互相覆盖。
+      分片键创建后不可修改；若必须改，应建新记录并删除旧记录，而不是普通 UPDATE。
+    -->
+    <update id="updateResult">
+        UPDATE inspection_record
+        SET status = #{status},
+            result_description = #{resultDescription},
+            version = version + 1,
+            updated_at = #{updatedAt}
+        WHERE tenant_id = #{tenantId}
+          AND record_date = #{recordDate}
+          AND id = #{id}
+          AND version = #{expectedVersion}
+    </update>
+
+    <!--
+      故意缺少 record_date 的反例：虽然 tenant_id 仍能裁剪到一个库，
+      但 ShardingSphere 必须查询目标库的 4 张季度槽位表并归并 LIMIT 1。
+      只供 /api/debug/unsafe 实验，正常业务绝不能调用。
+    -->
+    <select id="unsafeSelectWithoutDate" resultType="com.example.assetinspection.domain.InspectionRecord">
+        SELECT <include refid="recordColumns"/>
+        FROM inspection_record
+        WHERE tenant_id = #{tenantId}
+          AND id = #{id}
+        LIMIT 1
+    </select>
+
+    <!-- 迁移对账也必须按 tenant + 时间窗口做路由，避免一次 COUNT 广播全部季度节点。 -->
+    <select id="countForTenantAndRange" resultType="long">
+        SELECT COUNT(*)
+        FROM inspection_record
+        WHERE tenant_id = #{tenantId}
+          AND record_date &gt;= #{startDate}
+          AND record_date &lt; #{endDateExclusive}
+    </select>
+</mapper>

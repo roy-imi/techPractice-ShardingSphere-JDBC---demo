@@ -1,0 +1,106 @@
+# 标准版规则：单库共享 + 四张固定季度表 + 一主一从。
+# sharding.enabled=false 时由 ProductDataSourceConfiguration 选择本文件。
+# 业务代码仍只访问逻辑表 inspection_record，不直接拼接 q1/q2/q3/q4。
+
+# ShardingSphere-JDBC 对应用暴露的逻辑数据库名，不是 MySQL schema 名。
+databaseName: asset_management_standard
+
+# 单应用 Demo 使用内存仓库保存规则元数据；应用重启后从本 YAML 重新加载。
+mode:
+  type: Standalone
+  repository:
+    type: Memory
+
+# 标准版只有一个共享分片库，但仍保留主从读写组。
+dataSources:
+  # 所有 INSERT / UPDATE / DELETE 最终进入 ds0 主库。
+  ds0_primary:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://127.0.0.1:13307/asset_ds_0?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8&useUnicode=true&rewriteBatchedStatements=true
+    username: asset_app
+    password: asset-password
+    maximumPoolSize: 5
+    minimumIdle: 1
+    poolName: ds0-primary-pool
+
+  # 非事务普通 SELECT 优先进入 ds0 从库。
+  ds0_replica:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://127.0.0.1:13308/asset_ds_0?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8&useUnicode=true
+    username: asset_app
+    password: asset-password
+    maximumPoolSize: 5
+    minimumIdle: 1
+    poolName: ds0-replica-pool
+    readOnly: true
+
+rules:
+  - !SHARDING
+    tables:
+      # inspection_record 是 Java/MyBatis 看见的唯一逻辑表。
+      inspection_record:
+        # 四个固定槽位：自然季度 Q1 永远映射 q1，...，Q4 永远映射 q4。
+        actualDataNodes: "<GROOVY>ds_0.inspection_record_q${1..4}"
+
+        # 标准版不配置 databaseStrategy：tenant_id 只做数据隔离条件，不决定数据库。
+        # tableStrategy 始终按 record_date 精确/范围裁剪到季度表。
+        tableStrategy:
+          standard:
+            shardingColumn: record_date
+            shardingAlgorithmName: fixed_quarter_hot_window
+
+        # 应用不传 id；ShardingSphere 在 INSERT 改写阶段生成全局趋势递增 ID。
+        keyGenerateStrategy:
+          column: id
+          keyGeneratorName: snowflake
+
+        # 更新/删除若缺少 record_date，拒绝执行，避免误操作四个季度槽位。
+        auditStrategy:
+          auditorNames:
+            - sharding_key_required_auditor
+          allowHintDisable: false
+
+    shardingAlgorithms:
+      # CLASS_BASED 是 ShardingSphere 官方提供的“加载自定义标准算法”适配器。
+      fixed_quarter_hot_window:
+        type: CLASS_BASED
+        props:
+          strategy: STANDARD
+          algorithmClassName: com.example.assetinspection.algorithm.quarter.FixedQuarterShardingAlgorithm
+          # ShardingSphere 的 JVM 属性占位符格式是 $${属性名::默认值}。
+          # Spring 先解析 CURRENT_QUARTER，再把同一个值写入该 JVM 属性，消除双配置漂移。
+          current-quarter: "$${asset.demo.current-quarter::2026Q3}"
+          # 四表中常态三表为热窗口、一表待命，因此该值在算法中被强制校验为 3。
+          retained-quarter-count: 3
+
+    keyGenerators:
+      snowflake:
+        type: SNOWFLAKE
+        props:
+          # Demo 单应用固定为 1；生产多实例必须给每个实例分配不同 worker-id。
+          worker-id: 1
+
+    auditors:
+      sharding_key_required_auditor:
+        type: DML_SHARDING_CONDITIONS
+
+  - !READWRITE_SPLITTING
+    dataSourceGroups:
+      # ds_0 是分片规则引用的逻辑读写组，不是一个额外 MySQL 实例。
+      ds_0:
+        writeDataSourceName: ds0_primary
+        readDataSourceNames:
+          - ds0_replica
+        # 事务内读主库，保证 create/update 后在同一事务回读到最新值。
+        transactionalReadQueryStrategy: PRIMARY
+        loadBalancerName: round_robin
+
+    loadBalancers:
+      round_robin:
+        type: ROUND_ROBIN
+
+props:
+  # 教学环境打印 Logic SQL 与 Actual SQL；生产通常关闭或按需采样。
+  sql-show: true

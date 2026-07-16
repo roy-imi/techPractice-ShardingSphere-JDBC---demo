@@ -1,0 +1,133 @@
+# 大客户规则：按 tenant_id 分库 + 四张固定季度表 + 每库一主一从。
+# sharding.enabled=true 时由 ProductDataSourceConfiguration 选择本文件。
+
+databaseName: asset_management_tenant
+
+mode:
+  type: Standalone
+  repository:
+    type: Memory
+
+# 两个分片库各自维护主从；应用只看到一个 ShardingSphere 逻辑 DataSource。
+dataSources:
+  ds0_primary:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://127.0.0.1:13307/asset_ds_0?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8&useUnicode=true&rewriteBatchedStatements=true
+    username: asset_app
+    password: asset-password
+    maximumPoolSize: 5
+    minimumIdle: 1
+    poolName: ds0-primary-pool
+
+  ds0_replica:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://127.0.0.1:13308/asset_ds_0?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8&useUnicode=true
+    username: asset_app
+    password: asset-password
+    maximumPoolSize: 5
+    minimumIdle: 1
+    poolName: ds0-replica-pool
+    readOnly: true
+
+  ds1_primary:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://127.0.0.1:13309/asset_ds_1?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8&useUnicode=true&rewriteBatchedStatements=true
+    username: asset_app
+    password: asset-password
+    maximumPoolSize: 5
+    minimumIdle: 1
+    poolName: ds1-primary-pool
+
+  ds1_replica:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://127.0.0.1:13310/asset_ds_1?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8&useUnicode=true
+    username: asset_app
+    password: asset-password
+    maximumPoolSize: 5
+    minimumIdle: 1
+    poolName: ds1-replica-pool
+    readOnly: true
+
+rules:
+  - !SHARDING
+    tables:
+      inspection_record:
+        # 两个库 × 每库四个固定季度槽位，共八个可路由物理节点。
+        actualDataNodes: "<GROOVY>ds_${0..1}.inspection_record_q${1..4}"
+
+        # 第一层：tenant_id 等值路由到一个分片库。
+        databaseStrategy:
+          standard:
+            shardingColumn: tenant_id
+            shardingAlgorithmName: tenant_database_mod
+
+        # 第二层：record_date 路由到该库中的 q1/q2/q3/q4。
+        tableStrategy:
+          standard:
+            shardingColumn: record_date
+            shardingAlgorithmName: fixed_quarter_hot_window
+
+        keyGenerateStrategy:
+          column: id
+          keyGeneratorName: snowflake
+
+        # DML 必须具有可路由分片条件；业务层同时强制 tenant_id 和 record_date。
+        auditStrategy:
+          auditorNames:
+            - sharding_key_required_auditor
+          allowHintDisable: false
+
+    shardingAlgorithms:
+      # 自定义分库算法显式读取 shard-count；修改分片数必须做再分片迁移，不能热改。
+      tenant_database_mod:
+        type: CLASS_BASED
+        props:
+          strategy: STANDARD
+          algorithmClassName: com.example.assetinspection.algorithm.tenant.TenantDatabaseShardingAlgorithm
+          shard-count: 2
+
+      # 与标准版共用完全相同的固定季度算法，保证一套业务代码支持两种交付形态。
+      fixed_quarter_hot_window:
+        type: CLASS_BASED
+        props:
+          strategy: STANDARD
+          algorithmClassName: com.example.assetinspection.algorithm.quarter.FixedQuarterShardingAlgorithm
+          current-quarter: "$${asset.demo.current-quarter::2026Q3}"
+          retained-quarter-count: 3
+
+    keyGenerators:
+      snowflake:
+        type: SNOWFLAKE
+        props:
+          worker-id: 1
+
+    auditors:
+      sharding_key_required_auditor:
+        type: DML_SHARDING_CONDITIONS
+
+  - !READWRITE_SPLITTING
+    dataSourceGroups:
+      ds_0:
+        writeDataSourceName: ds0_primary
+        readDataSourceNames:
+          - ds0_replica
+        transactionalReadQueryStrategy: PRIMARY
+        loadBalancerName: round_robin
+
+      ds_1:
+        writeDataSourceName: ds1_primary
+        readDataSourceNames:
+          - ds1_replica
+        transactionalReadQueryStrategy: PRIMARY
+        loadBalancerName: round_robin
+
+    loadBalancers:
+      round_robin:
+        type: ROUND_ROBIN
+
+props:
+  sql-show: true

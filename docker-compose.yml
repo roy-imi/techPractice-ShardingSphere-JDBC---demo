@@ -1,0 +1,218 @@
+# 这个 Compose 文件只负责搭建“可复现的教学拓扑”。
+# ShardingSphere-JDBC 运行在 Java 进程内，不需要额外启动 Proxy 容器。
+#
+# 拓扑与端口：
+#   legacy-mysql  127.0.0.1:13306  原始单库单表，server-id=10
+#   ds0-primary   127.0.0.1:13307  0 号分片主库，server-id=100
+#   ds0-replica   127.0.0.1:13308  0 号分片从库，server-id=200
+#   ds1-primary   127.0.0.1:13309  1 号分片主库，server-id=101
+#   ds1-replica   127.0.0.1:13310  1 号分片从库，server-id=201
+
+# 五个数据库实例共享的最小环境变量。
+x-mysql-common-environment: &mysql-common-environment
+  MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-root-password}"
+  # 允许 replication-setup 从 Compose 内部网络登录 root。
+  # 这是为了让 Demo 自举；生产环境应改用最小权限运维账号并限制来源地址。
+  MYSQL_ROOT_HOST: "%"
+  MYSQL_INITDB_SKIP_TZINFO: "1"
+  TZ: Asia/Shanghai
+
+# 健康检查只表示 mysqld 已可接受连接；复制是否正常由 replication-setup 和检查脚本判断。
+x-mysql-healthcheck: &mysql-healthcheck
+  test:
+    - CMD-SHELL
+    - >-
+      MYSQL_PWD="$${MYSQL_ROOT_PASSWORD}"
+      mysqladmin ping --host=127.0.0.1 --user=root --silent
+  interval: 5s
+  timeout: 5s
+  retries: 30
+  start_period: 30s
+
+services:
+  # 改造前的基线：所有租户、所有季度都在 asset_legacy.inspection_record。
+  legacy-mysql:
+    image: "${MYSQL_IMAGE:-mysql:8.0.42}"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+08:00
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --binlog-expire-logs-seconds=604800
+      - --server-id=10
+      - --log-bin=legacy-bin
+    environment:
+      <<: *mysql-common-environment
+      MYSQL_DATABASE: asset_legacy
+      # 应用账号与 application-legacy.properties 保持一致。
+      MYSQL_USER: asset_app
+      MYSQL_PASSWORD: asset-password
+    ports:
+      - "127.0.0.1:${LEGACY_MYSQL_PORT:-13306}:3306"
+    volumes:
+      - legacy-data:/var/lib/mysql
+      - ./docker/legacy-init:/docker-entrypoint-initdb.d:ro
+    healthcheck: *mysql-healthcheck
+    networks:
+      - asset-demo-network
+    restart: unless-stopped
+
+  # tenant_id 为偶数时路由到 ds0；所有写操作先进入该主库。
+  ds0-primary:
+    image: "${MYSQL_IMAGE:-mysql:8.0.42}"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+08:00
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --binlog-expire-logs-seconds=604800
+      - --server-id=100
+      - --log-bin=ds0-primary-bin
+      - --log-replica-updates=ON
+    environment:
+      <<: *mysql-common-environment
+      MYSQL_DATABASE: asset_ds_0
+      MYSQL_USER: asset_app
+      MYSQL_PASSWORD: asset-password
+    ports:
+      - "127.0.0.1:${DS0_PRIMARY_PORT:-13307}:3306"
+    volumes:
+      - ds0-primary-data:/var/lib/mysql
+      # 同一套脚本通过 MYSQL_DATABASE 分别创建 ds0、ds1 的四张固定季度槽位表。
+      - ./docker/primary-init:/docker-entrypoint-initdb.d:ro
+    healthcheck: *mysql-healthcheck
+    networks:
+      - asset-demo-network
+    restart: unless-stopped
+
+  # ds0 的只读副本；配置完成后 read_only 与 super_read_only 都会持久化为 ON。
+  ds0-replica:
+    image: "${MYSQL_IMAGE:-mysql:8.0.42}"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+08:00
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --binlog-expire-logs-seconds=604800
+      - --server-id=200
+      - --log-bin=ds0-replica-bin
+      - --relay-log=ds0-relay-bin
+      - --log-replica-updates=ON
+    environment:
+      <<: *mysql-common-environment
+    ports:
+      - "127.0.0.1:${DS0_REPLICA_PORT:-13308}:3306"
+    volumes:
+      - ds0-replica-data:/var/lib/mysql
+    healthcheck: *mysql-healthcheck
+    networks:
+      - asset-demo-network
+    restart: unless-stopped
+
+  # tenant_id 为奇数时路由到 ds1；server-id 与 ds0 主库不同。
+  ds1-primary:
+    image: "${MYSQL_IMAGE:-mysql:8.0.42}"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+08:00
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --binlog-expire-logs-seconds=604800
+      - --server-id=101
+      - --log-bin=ds1-primary-bin
+      - --log-replica-updates=ON
+    environment:
+      <<: *mysql-common-environment
+      MYSQL_DATABASE: asset_ds_1
+      MYSQL_USER: asset_app
+      MYSQL_PASSWORD: asset-password
+    ports:
+      - "127.0.0.1:${DS1_PRIMARY_PORT:-13309}:3306"
+    volumes:
+      - ds1-primary-data:/var/lib/mysql
+      - ./docker/primary-init:/docker-entrypoint-initdb.d:ro
+    healthcheck: *mysql-healthcheck
+    networks:
+      - asset-demo-network
+    restart: unless-stopped
+
+  # ds1 的只读副本。
+  ds1-replica:
+    image: "${MYSQL_IMAGE:-mysql:8.0.42}"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+08:00
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --binlog-expire-logs-seconds=604800
+      - --server-id=201
+      - --log-bin=ds1-replica-bin
+      - --relay-log=ds1-relay-bin
+      - --log-replica-updates=ON
+    environment:
+      <<: *mysql-common-environment
+    ports:
+      - "127.0.0.1:${DS1_REPLICA_PORT:-13310}:3306"
+    volumes:
+      - ds1-replica-data:/var/lib/mysql
+    healthcheck: *mysql-healthcheck
+    networks:
+      - asset-demo-network
+    restart: unless-stopped
+
+  # 一次性初始化器：五个 MySQL 节点健康后，建立两组 GTID 自动定位复制。
+  # legacy 不是复制源，但把它也作为健康门槛，可保证启动脚本返回时整套拓扑都可用。
+  # 成功后容器会以退出码 0 停止，这是预期状态，不是故障。
+  replication-setup:
+    image: "${MYSQL_IMAGE:-mysql:8.0.42}"
+    entrypoint:
+      - /bin/bash
+      - /scripts/configure-replication.sh
+    environment:
+      ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-root-password}"
+      REPLICATION_PASSWORD: replication-password
+      APP_PASSWORD: asset-password
+    volumes:
+      - ./docker/replication/configure-replication.sh:/scripts/configure-replication.sh:ro
+    depends_on:
+      legacy-mysql:
+        condition: service_healthy
+      ds0-primary:
+        condition: service_healthy
+      ds0-replica:
+        condition: service_healthy
+      ds1-primary:
+        condition: service_healthy
+      ds1-replica:
+        condition: service_healthy
+    networks:
+      - asset-demo-network
+    restart: "no"
+
+# 命名卷让 docker compose down 后数据仍保留，便于连续学习。
+# 只有明确执行 docker compose down -v 才会删除数据并重新跑初始化脚本。
+volumes:
+  legacy-data:
+  ds0-primary-data:
+  ds0-replica-data:
+  ds1-primary-data:
+  ds1-replica-data:
+
+networks:
+  asset-demo-network:
+    driver: bridge

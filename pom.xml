@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+      本机目前是 JDK 8，因此 Demo 使用仍支持 Java 8 的 Spring Boot 2.7.18。
+      ShardingSphere 则锁定任务编写时（2026-07-16）的最新稳定版 5.5.3。
+      这是“为了本机可运行”的教学组合；新生产项目应重新评估 Java 17+/Boot 3.x。
+    -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>2.7.18</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.example</groupId>
+    <artifactId>shardingsphere-jdbc-inspection-demo</artifactId>
+    <version>1.0.0</version>
+    <name>shardingsphere-jdbc-inspection-demo</name>
+    <description>资产点巡检从单库单表演进到 ShardingSphere-JDBC 分库分表和读写分离的教学 Demo</description>
+
+    <properties>
+        <!-- 与用户当前机器保持一致，保证可以直接编译。 -->
+        <java.version>1.8</java.version>
+        <!-- 截至 2026-07-16 的 Apache ShardingSphere 最新稳定版。 -->
+        <shardingsphere.version>5.5.3</shardingsphere.version>
+        <!-- MyBatis 2.3.x 与 Spring Boot 2.7/JDK 8 兼容。 -->
+        <mybatis-spring-boot.version>2.3.2</mybatis-spring-boot.version>
+        <!-- ShardingSphere 5.5.x 官方说明 Boot 2 项目应显式使用 SnakeYAML 2.2。 -->
+        <snakeyaml.version>2.2</snakeyaml.version>
+        <!--
+          ShardingSphere 5.5.3 的依赖声明要求 Commons Lang 3.18.0，并会调用其中的 Strings 类。
+          Spring Boot 2.7.18 默认管理成 3.12.0，因此这里必须显式覆盖，避免运行时 NoClassDefFoundError。
+        -->
+        <commons-lang3.version>3.18.0</commons-lang3.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+    </properties>
+
+    <dependencies>
+        <!-- REST API、JSON 序列化和内嵌 Web 容器。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!-- DTO 的 @NotNull、@Size、@Pattern 等参数校验。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!-- Spring 事务、JdbcTemplate 以及默认 HikariCP 连接池。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+
+        <!-- 显式 SQL 更适合面试学习：可以直接观察分片键是否真的进入 WHERE。 -->
+        <dependency>
+            <groupId>org.mybatis.spring.boot</groupId>
+            <artifactId>mybatis-spring-boot-starter</artifactId>
+            <version>${mybatis-spring-boot.version}</version>
+        </dependency>
+
+        <!-- ShardingSphere-JDBC 的 Driver 和基础内核。 -->
+        <dependency>
+            <groupId>org.apache.shardingsphere</groupId>
+            <artifactId>shardingsphere-jdbc</artifactId>
+            <!--
+              5.5.3 官方 BOM 在 Maven Central 引用了未发布的 shardingsphere-distribution 父 POM，
+              当前可复现地无法解析，因此 Demo 对全部 ShardingSphere 模块显式锁同一版本。
+            -->
+            <version>${shardingsphere.version}</version>
+        </dependency>
+
+        <!-- 5.5.3 插件化后，MySQL SQL 解析器需要显式放进运行时。 -->
+        <dependency>
+            <groupId>org.apache.shardingsphere</groupId>
+            <artifactId>shardingsphere-parser-sql-engine-mysql</artifactId>
+            <version>${shardingsphere.version}</version>
+        </dependency>
+
+        <!-- MySQL JDBC 方言和元数据兼容实现。 -->
+        <dependency>
+            <groupId>org.apache.shardingsphere</groupId>
+            <artifactId>shardingsphere-jdbc-dialect-mysql</artifactId>
+            <version>${shardingsphere.version}</version>
+        </dependency>
+
+        <!-- 让 YAML 中的 HikariDataSource 能被 ShardingSphere 创建和适配。 -->
+        <dependency>
+            <groupId>org.apache.shardingsphere</groupId>
+            <artifactId>shardingsphere-infra-data-source-pool-hikari</artifactId>
+            <version>${shardingsphere.version}</version>
+        </dependency>
+
+        <!-- 支持 jdbc:shardingsphere:classpath:*.yaml 这种类路径规则 URL。 -->
+        <dependency>
+            <groupId>org.apache.shardingsphere</groupId>
+            <artifactId>shardingsphere-infra-url-classpath</artifactId>
+            <version>${shardingsphere.version}</version>
+        </dependency>
+
+        <!--
+          Standalone 模式也需要一个配置/元数据仓库实现。
+          5.5.3 已把 Memory 实现拆成可选插件，不显式引入会在启动阶段找不到对应 SPI。
+        -->
+        <dependency>
+            <groupId>org.apache.shardingsphere</groupId>
+            <artifactId>shardingsphere-standalone-mode-repository-memory</artifactId>
+            <version>${shardingsphere.version}</version>
+        </dependency>
+
+        <!--
+          JDBC Demo 不需要 ShardingSphere-Proxy 那套细粒度账户授权，因此使用 ALL_PERMITTED。
+          5.5.3 把该 PrivilegeProvider 拆进 simple 可选插件；缺少它会在首次建连接时报 SPI-00001。
+        -->
+        <dependency>
+            <groupId>org.apache.shardingsphere</groupId>
+            <artifactId>shardingsphere-authority-simple</artifactId>
+            <version>${shardingsphere.version}</version>
+        </dependency>
+
+        <!-- !SHARDING 规则的功能实现。 -->
+        <dependency>
+            <groupId>org.apache.shardingsphere</groupId>
+            <artifactId>shardingsphere-sharding-core</artifactId>
+            <version>${shardingsphere.version}</version>
+        </dependency>
+
+        <!-- !READWRITE_SPLITTING 规则的功能实现。 -->
+        <dependency>
+            <groupId>org.apache.shardingsphere</groupId>
+            <artifactId>shardingsphere-readwrite-splitting-core</artifactId>
+            <version>${shardingsphere.version}</version>
+        </dependency>
+
+        <!-- ShardingSphere 解析 YAML；版本按 5.5.3 官方 Boot 2 指引锁定。 -->
+        <dependency>
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+        </dependency>
+
+        <!--
+          不能只依赖传递依赖：Boot 2.7 会把 ShardingSphere 需要的 3.18.0 降级成 3.12.0。
+          显式声明版本既修复兼容性，也把这个常见的“编译通过、运行报类缺失”问题留作面试素材。
+        -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-lang3</artifactId>
+            <version>${commons-lang3.version}</version>
+        </dependency>
+
+        <!-- 实际连接四个 MySQL 物理数据源。 -->
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- JUnit 5、Mockito、AssertJ 和 Spring Test。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <!-- 让 Spring/MyBatis 在调试信息中保留方法参数名。 -->
+                    <parameters>true</parameters>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
