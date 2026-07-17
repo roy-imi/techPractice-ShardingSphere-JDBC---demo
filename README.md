@@ -35,7 +35,7 @@
 - 可以说：“我用 Demo 复现并验证了固定季度槽位、部署期分库选择和主从路由机制。”
 - 只有存在真实监控或压测报告时，才能说具体 QPS、P99、迁移时长和性能提升百分比。
 - 更准确的“统一管理主从”是：应用侧统一配置主从数据源并完成读写路由。MySQL 复制、故障选主、备份恢复和 HA 仍由数据库基础设施负责。
-- `sharding.sharding-key=tenant_id` 是启动校验项，不代表运维可任意改为其他字段；代码、SQL、索引和存量数据均以 `tenant_id` 为固定分库键。
+- `sharding.database-sharding-key=tenant_id` 明确声明的是“数据库分片键”，不是季度分表键；代码、SQL、索引和存量数据均以 `tenant_id` 为固定分库键。
 
 ## 一个改造前基线 + 两种产品部署形态
 
@@ -55,7 +55,7 @@ flowchart LR
 
 ```properties
 sharding.enabled=false
-sharding.sharding-key=tenant_id
+sharding.database-sharding-key=tenant_id
 ```
 
 ```mermaid
@@ -76,7 +76,7 @@ flowchart LR
 
 ```properties
 sharding.enabled=true
-sharding.sharding-key=tenant_id
+sharding.database-sharding-key=tenant_id
 ```
 
 ```mermaid
@@ -254,7 +254,7 @@ mvn spring-boot:run -Dspring-boot.run.profiles=product
 ```bash
 mvn spring-boot:run \
   -Dspring-boot.run.profiles=product \
-  -Dspring-boot.run.arguments="--sharding.enabled=true --sharding.sharding-key=tenant_id --demo.sharding.current-quarter=2026Q3"
+  -Dspring-boot.run.arguments="--sharding.enabled=true --sharding.database-sharding-key=tenant_id --demo.sharding.current-quarter=2026Q3"
 ```
 
 兼容入口 `--spring.profiles.active=sharding` 默认等价于开启租户分库，但生产交付建议统一用 `product` profile 加显式部署参数。
@@ -405,9 +405,9 @@ Actual SQL: ds1_replica ::: SELECT ... FROM inspection_record_q3 WHERE tenant_id
 
 不能。项目在应用启动阶段选择部署拓扑，运行期间不监听刷新。即使技术上能刷新，也不能绕过存量数据迁移和多实例规则一致性。
 
-### 为什么 `sharding.sharding-key` 还要配置？
+### 为什么 `sharding.database-sharding-key` 在 false 模式下仍然存在？
 
-它用于部署时声明和校验预期键必须为 `tenant_id`，防止错误配置悄悄启动。它不是通用列名替换器；改为 `asset_id` 应启动失败。
+它声明的是两种产品形态共同遵守的数据库分片契约。`false` 时所有租户固定进入 ds_0，它不参与选库；`true` 时才由它参与数据库路由。两种形态都保留并校验该声明，是为了防止同一套代码的租户键发生漂移。季度分表键始终是 `record_date`，由 ShardingSphere YAML 单独配置。
 
 ### 为什么固定四张表不会跨年读错？
 

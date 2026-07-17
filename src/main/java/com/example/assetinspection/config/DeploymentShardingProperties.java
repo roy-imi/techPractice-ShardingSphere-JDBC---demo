@@ -18,8 +18,9 @@ public class DeploymentShardingProperties {
     // false：标准版单库共享；true：大客户按 tenant_id 分库。
     private boolean enabled;
 
-    // 面试方案的分库键固定为 tenant_id；保留配置项只为部署自检，不允许随意改列名。
-    private String shardingKey = "tenant_id";
+    // 这是“数据库分片键”的架构声明，不是控制分表的配置；季度分表键固定为 record_date。
+    // 即使标准版未启用租户分库，也保留该声明用于部署自检，防止两种交付形态的契约漂移。
+    private String databaseShardingKey = "tenant_id";
 
     public boolean isEnabled() {
         return enabled;
@@ -29,19 +30,19 @@ public class DeploymentShardingProperties {
         this.enabled = enabled;
     }
 
-    public String getShardingKey() {
-        return shardingKey;
+    public String getDatabaseShardingKey() {
+        return databaseShardingKey;
     }
 
-    public void setShardingKey(String shardingKey) {
-        this.shardingKey = shardingKey;
+    public void setDatabaseShardingKey(String databaseShardingKey) {
+        this.databaseShardingKey = databaseShardingKey;
     }
 
     /** 启动前校验部署参数，避免“配置写了但规则实际不是那一列”的假开关。 */
     public void validateForStartup() {
-        if (!"tenant_id".equals(shardingKey)) {
+        if (!"tenant_id".equals(databaseShardingKey)) {
             throw new IllegalStateException(
-                    "sharding.sharding-key 只允许 tenant_id；更换分片键属于数据架构迁移，"
+                    "sharding.database-sharding-key 只允许 tenant_id；更换数据库分片键属于数据架构迁移，"
                             + "不能通过部署配置直接完成");
         }
     }
