@@ -46,7 +46,7 @@ public class ProductDataSourceConfiguration {
     @Bean(destroyMethod = "close")
     public DataSource dataSource(DeploymentShardingProperties properties,
                                  ShardingRangeProperties rangeProperties) {
-        // 先做失败即停机的配置校验，绝不带着错误分片键继续提供服务。
+        // 先做失败即停机的配置校验，绝不带着错误数据库分片键继续提供服务。
         properties.validateForStartup();
 
         // 两层配置必须共用一个 current-quarter，不能让业务校验认为 Q4、路由算法仍认为 Q3。

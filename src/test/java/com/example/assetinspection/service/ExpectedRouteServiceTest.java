@@ -95,7 +95,7 @@ class ExpectedRouteServiceTest {
 
         DeploymentShardingProperties deployment = new DeploymentShardingProperties();
         deployment.setEnabled(tenantShardingEnabled);
-        deployment.setShardingKey("tenant_id");
+        deployment.setDatabaseShardingKey("tenant_id");
 
         return new ExpectedRouteService(
                 new ShardingRangeValidator(range),
